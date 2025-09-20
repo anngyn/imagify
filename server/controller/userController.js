@@ -129,15 +129,13 @@ const paymentVNPay = async (req, res) => {
       req.headers["x-forwarded-for"] ||
       req.connection.remoteAddress ||
       req.socket.remoteAddress ||
-      (req.connection.socket ? req.connection.socket.remoteAddress : null) ||
+      req.connection.socket.remoteAddress ||
       "127.0.0.1";
 
-    const vnpayUrl = createVNPayUrl(
-      newTransaction._id.toString(),
-      amount,
-      orderInfo,
-      ipAddr
-    );
+    // Tạo orderId theo format VNPAY (sử dụng transaction ID)
+    const orderId = newTransaction._id.toString();
+
+    const vnpayUrl = createVNPayUrl(orderId, amount, orderInfo, ipAddr);
 
     res.json({
       success: true,
