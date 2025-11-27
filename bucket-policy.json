@@ -1,0 +1,26 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "arn:aws:iam::503130572927:role/ImagifyStack-CustomS3AutoDeleteObjectsCustomResourc-B39KwTXAW6B6"
+      },
+      "Action": [
+        "s3:GetBucket*",
+        "s3:List*",
+        "s3:DeleteObject*"
+      ],
+      "Resource": [
+        "arn:aws:s3:::imagifystack-imagesbucket1e86afb2-lzqhvczq7zay",
+        "arn:aws:s3:::imagifystack-imagesbucket1e86afb2-lzqhvczq7zay/*"
+      ]
+    },
+    {
+      "Effect": "Allow",
+      "Principal": "*",
+      "Action": "s3:GetObject",
+      "Resource": "arn:aws:s3:::imagifystack-imagesbucket1e86afb2-lzqhvczq7zay/images/*"
+    }
+  ]
+}

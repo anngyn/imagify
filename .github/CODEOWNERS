@@ -1,0 +1,17 @@
+# Global owners
+* @your-username
+
+# Infrastructure changes require DevOps review
+/infrastructure/ @your-username @devops-team
+
+# Lambda functions require backend review
+/infrastructure/lambda/ @your-username @backend-team
+
+# Client changes require frontend review
+/client/ @your-username @frontend-team
+
+# Server changes require backend review
+/server/ @your-username @backend-team
+
+# CI/CD changes require DevOps review
+/.github/ @your-username @devops-team

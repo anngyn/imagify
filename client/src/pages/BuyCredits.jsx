@@ -3,7 +3,7 @@ import { plans, assets } from "../assets/assets";
 import { AppContext } from "../context/AppContext";
 import { motion } from "framer-motion";
 const BuyCredits = () => {
-  const { user, paymentVNPay } = useContext(AppContext);
+  const { user, payCredits } = useContext(AppContext);
 
   console.log("User in BuyCredits:", user);
   return (
@@ -38,7 +38,7 @@ const BuyCredits = () => {
               onClick={() => {
                 console.log("Button clicked, user:", user, "planId:", item.id);
                 if (user) {
-                  paymentVNPay(item.id);
+                  payCredits(item.id);
                 } else {
                   console.log("User not logged in");
                 }

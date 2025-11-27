@@ -14,7 +14,7 @@ await connectDB();
 
 app.use("/api/user", userRouter);
 app.use("/api/image", imageRouter);
-app.get("/", (req, res) => {
+app.post("/api/create-qr", (req, res) => {
   console.log("Environment variables check:");
   console.log("VNPAY_TMN_CODE:", process.env.VNPAY_TMN_CODE);
   console.log(
