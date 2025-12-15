@@ -59,3 +59,4 @@ cdk.out/
 
 # AWS
 .aws/
+.kiro/
