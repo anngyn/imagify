@@ -1,0 +1,155 @@
+name: Blue-Green Deployment
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+        - staging
+        - prod
+
+env:
+  AWS_REGION: us-east-1
+
+jobs:
+  deploy-blue:
+    name: Deploy to Blue Environment
+    runs-on: ubuntu-latest
+    outputs:
+      blue-stack-name: ${{ steps.deploy.outputs.stack-name }}
+      
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Configure AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: infrastructure/package-lock.json
+
+      - name: Install CDK
+        run: npm install -g aws-cdk
+
+      - name: Deploy Blue Stack
+        id: deploy
+        run: |
+          cd infrastructure
+          npm ci
+          STACK_NAME="ImagifyStack-Blue-${{ github.sha }}"
+          echo "stack-name=$STACK_NAME" >> $GITHUB_OUTPUT
+          cdk deploy $STACK_NAME --require-approval never
+        env:
+          VNPAY_TMN_CODE: ${{ secrets.VNPAY_TMN_CODE }}
+          VNPAY_HASH_SECRET: ${{ secrets.VNPAY_HASH_SECRET }}
+          VNPAY_URL: ${{ secrets.VNPAY_URL }}
+          VNPAY_RETURN_URL: ${{ secrets.VNPAY_RETURN_URL }}
+
+  health-check:
+    name: Health Check Blue Environment
+    runs-on: ubuntu-latest
+    needs: deploy-blue
+    outputs:
+      health-status: ${{ steps.check.outputs.status }}
+      
+    steps:
+      - name: Get API Gateway URL
+        id: get-url
+        run: |
+          API_URL=$(aws cloudformation describe-stacks \
+            --stack-name ${{ needs.deploy-blue.outputs.blue-stack-name }} \
+            --query 'Stacks[0].Outputs[?OutputKey==`ApiGatewayUrl`].OutputValue' \
+            --output text)
+          echo "api-url=$API_URL" >> $GITHUB_OUTPUT
+
+      - name: Health Check
+        id: check
+        run: |
+          for i in {1..5}; do
+            if curl -f "${{ steps.get-url.outputs.api-url }}/health"; then
+              echo "status=healthy" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+            sleep 30
+          done
+          echo "status=unhealthy" >> $GITHUB_OUTPUT
+          exit 1
+
+  switch-traffic:
+    name: Switch Traffic to Blue
+    runs-on: ubuntu-latest
+    needs: [deploy-blue, health-check]
+    if: needs.health-check.outputs.health-status == 'healthy'
+    
+    steps:
+      - name: Update Route 53 to Blue
+        run: |
+          # Get Blue environment ALB DNS
+          BLUE_DNS=$(aws cloudformation describe-stacks \
+            --stack-name ${{ needs.deploy-blue.outputs.blue-stack-name }} \
+            --query 'Stacks[0].Outputs[?OutputKey==`LoadBalancerDNS`].OutputValue' \
+            --output text)
+          
+          # Update Route 53 record
+          aws route53 change-resource-record-sets \
+            --hosted-zone-id ${{ secrets.HOSTED_ZONE_ID }} \
+            --change-batch '{
+              "Changes": [{
+                "Action": "UPSERT",
+                "ResourceRecordSet": {
+                  "Name": "api.imagify.com",
+                  "Type": "CNAME",
+                  "TTL": 60,
+                  "ResourceRecords": [{"Value": "'$BLUE_DNS'"}]
+                }
+              }]
+            }'
+
+  cleanup-green:
+    name: Cleanup Old Green Environment
+    runs-on: ubuntu-latest
+    needs: [switch-traffic]
+    if: always() && needs.switch-traffic.result == 'success'
+    
+    steps:
+      - name: Delete Old Green Stack
+        run: |
+          # Find and delete previous green stack
+          OLD_STACKS=$(aws cloudformation list-stacks \
+            --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE \
+            --query 'StackSummaries[?contains(StackName, `ImagifyStack-Green`)].StackName' \
+            --output text)
+          
+          for stack in $OLD_STACKS; do
+            echo "Deleting old stack: $stack"
+            aws cloudformation delete-stack --stack-name $stack
+          done
+
+  rollback:
+    name: Rollback on Failure
+    runs-on: ubuntu-latest
+    needs: [deploy-blue, health-check]
+    if: failure()
+    
+    steps:
+      - name: Delete Failed Blue Stack
+        run: |
+          aws cloudformation delete-stack \
+            --stack-name ${{ needs.deploy-blue.outputs.blue-stack-name }}
+          
+      - name: Notify Failure
+        run: |
+          echo "::error::Blue-Green deployment failed. Rolling back..."

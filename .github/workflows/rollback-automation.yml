@@ -1,0 +1,177 @@
+name: Automated Rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to rollback'
+        required: true
+        type: choice
+        options:
+        - staging
+        - production
+      rollback_version:
+        description: 'Version to rollback to (optional - will use last known good)'
+        required: false
+
+jobs:
+  detect-issues:
+    name: Detect Issues
+    runs-on: ubuntu-latest
+    outputs:
+      should-rollback: ${{ steps.check.outputs.rollback }}
+      
+    steps:
+      - name: Check Health Metrics
+        id: check
+        run: |
+          # Check error rate
+          ERROR_RATE=$(aws cloudwatch get-metric-statistics \
+            --namespace AWS/ApplicationELB \
+            --metric-name HTTPCode_Target_5XX_Count \
+            --dimensions Name=LoadBalancer,Value=ImagifyStack-${{ github.event.inputs.environment }} \
+            --start-time $(date -u -d '10 minutes ago' +%Y-%m-%dT%H:%M:%S) \
+            --end-time $(date -u +%Y-%m-%dT%H:%M:%S) \
+            --period 300 \
+            --statistics Average \
+            --query 'Datapoints[0].Average' \
+            --output text)
+          
+          # Check response time
+          RESPONSE_TIME=$(aws cloudwatch get-metric-statistics \
+            --namespace AWS/ApplicationELB \
+            --metric-name TargetResponseTime \
+            --dimensions Name=LoadBalancer,Value=ImagifyStack-${{ github.event.inputs.environment }} \
+            --start-time $(date -u -d '10 minutes ago' +%Y-%m-%dT%H:%M:%S) \
+            --end-time $(date -u +%Y-%m-%dT%H:%M:%S) \
+            --period 300 \
+            --statistics Average \
+            --query 'Datapoints[0].Average' \
+            --output text)
+          
+          # Decision logic
+          if (( $(echo "$ERROR_RATE > 5" | bc -l) )) || (( $(echo "$RESPONSE_TIME > 2" | bc -l) )); then
+            echo "rollback=true" >> $GITHUB_OUTPUT
+            echo "::warning::High error rate ($ERROR_RATE%) or slow response time (${RESPONSE_TIME}s) detected"
+          else
+            echo "rollback=false" >> $GITHUB_OUTPUT
+          fi
+
+  get-last-good-version:
+    name: Get Last Known Good Version
+    runs-on: ubuntu-latest
+    needs: detect-issues
+    if: needs.detect-issues.outputs.should-rollback == 'true'
+    outputs:
+      rollback-version: ${{ steps.version.outputs.version }}
+      
+    steps:
+      - name: Find Last Good Version
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.rollback_version }}" ]; then
+            echo "version=${{ github.event.inputs.rollback_version }}" >> $GITHUB_OUTPUT
+          else
+            # Get last successful deployment from DynamoDB or S3
+            LAST_GOOD=$(aws dynamodb get-item \
+              --table-name imagify-deployments \
+              --key '{"environment": {"S": "${{ github.event.inputs.environment }}"}, "status": {"S": "success"}}' \
+              --query 'Item.version.S' \
+              --output text)
+            echo "version=$LAST_GOOD" >> $GITHUB_OUTPUT
+          fi
+
+  execute-rollback:
+    name: Execute Rollback
+    runs-on: ubuntu-latest
+    needs: [detect-issues, get-last-good-version]
+    if: needs.detect-issues.outputs.should-rollback == 'true'
+    environment: ${{ github.event.inputs.environment }}
+    
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.get-last-good-version.outputs.rollback-version }}
+      
+      - name: Configure AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Rollback Infrastructure
+        run: |
+          cd infrastructure
+          npm ci
+          
+          # Deploy previous version
+          STACK_NAME="ImagifyStack-${{ github.event.inputs.environment }}"
+          cdk deploy $STACK_NAME --require-approval never
+          
+          echo "::notice::Rolled back to version ${{ needs.get-last-good-version.outputs.rollback-version }}"
+
+      - name: Rollback Frontend
+        run: |
+          cd client
+          npm ci
+          npm run build
+          
+          # Deploy to S3
+          BUCKET_NAME=$(aws cloudformation describe-stacks \
+            --stack-name ImagifyStack-${{ github.event.inputs.environment }} \
+            --query 'Stacks[0].Outputs[?OutputKey==`WebsiteBucket`].OutputValue' \
+            --output text)
+          
+          aws s3 sync dist/ s3://$BUCKET_NAME/ --delete
+
+  verify-rollback:
+    name: Verify Rollback Success
+    runs-on: ubuntu-latest
+    needs: execute-rollback
+    
+    steps:
+      - name: Health Check
+        run: |
+          API_URL=$(aws cloudformation describe-stacks \
+            --stack-name ImagifyStack-${{ github.event.inputs.environment }} \
+            --query 'Stacks[0].Outputs[?OutputKey==`ApiGatewayUrl`].OutputValue' \
+            --output text)
+          
+          for i in {1..10}; do
+            if curl -f "$API_URL/health"; then
+              echo "✅ Rollback successful - service is healthy"
+              exit 0
+            fi
+            sleep 30
+          done
+          
+          echo "::error::Rollback verification failed"
+          exit 1
+
+      - name: Update Deployment Record
+        run: |
+          # Record successful rollback
+          aws dynamodb put-item \
+            --table-name imagify-deployments \
+            --item '{
+              "environment": {"S": "${{ github.event.inputs.environment }}"},
+              "version": {"S": "${{ needs.get-last-good-version.outputs.rollback-version }}"},
+              "status": {"S": "rollback-success"},
+              "timestamp": {"S": "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"}
+            }'
+
+  notify:
+    name: Notify Team
+    runs-on: ubuntu-latest
+    needs: [detect-issues, verify-rollback]
+    if: always()
+    
+    steps:
+      - name: Notify Rollback
+        run: |
+          if [ "${{ needs.verify-rollback.result }}" == "success" ]; then
+            echo "🔄 Rollback completed successfully for ${{ github.event.inputs.environment }}"
+          else
+            echo "❌ Rollback failed for ${{ github.event.inputs.environment }}"
+          fi

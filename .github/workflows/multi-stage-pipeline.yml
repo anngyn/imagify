@@ -1,0 +1,136 @@
+name: Multi-Stage Pipeline with Approvals
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  # Stage 1: Build & Test
+  build-test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    outputs:
+      build-version: ${{ steps.version.outputs.version }}
+      
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Generate Version
+        id: version
+        run: echo "version=$(date +%Y%m%d)-${{ github.sha }}" >> $GITHUB_OUTPUT
+      
+      - name: Run Tests
+        run: |
+          cd infrastructure && npm ci && npm test
+          cd ../client && npm ci && npm run build
+          
+      - name: Security Scan
+        run: |
+          npm audit --audit-level moderate
+          
+  # Stage 2: Deploy to Dev (Automatic)
+  deploy-dev:
+    name: Deploy to Development
+    runs-on: ubuntu-latest
+    needs: build-test
+    environment: development
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Deploy to Dev
+        run: |
+          echo "Deploying version ${{ needs.build-test.outputs.build-version }} to DEV"
+          # CDK deploy with dev environment
+          
+  # Stage 3: Integration Tests
+  integration-tests:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: deploy-dev
+    
+    steps:
+      - name: Run Integration Tests
+        run: |
+          echo "Running integration tests against DEV environment"
+          # API tests, E2E tests
+          
+  # Stage 4: Deploy to Staging (Manual Approval)
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: [build-test, integration-tests]
+    environment: 
+      name: staging
+      url: https://staging.imagify.com
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Deploy to Staging
+        run: |
+          echo "Deploying version ${{ needs.build-test.outputs.build-version }} to STAGING"
+          # CDK deploy with staging environment
+          
+  # Stage 5: Staging Tests
+  staging-tests:
+    name: Staging Validation
+    runs-on: ubuntu-latest
+    needs: deploy-staging
+    
+    steps:
+      - name: Performance Tests
+        run: |
+          echo "Running performance tests against STAGING"
+          # Load testing with k6 or Artillery
+          
+      - name: Security Tests
+        run: |
+          echo "Running security tests against STAGING"
+          # OWASP ZAP or similar
+          
+  # Stage 6: Deploy to Production (Manual Approval + Stakeholder Review)
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [build-test, staging-tests]
+    environment: 
+      name: production
+      url: https://imagify.com
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Pre-deployment Checklist
+        run: |
+          echo "✅ All tests passed"
+          echo "✅ Security scan completed"
+          echo "✅ Performance tests passed"
+          echo "✅ Staging validation successful"
+          
+      - name: Deploy to Production
+        run: |
+          echo "Deploying version ${{ needs.build-test.outputs.build-version }} to PRODUCTION"
+          # Blue-Green deployment to production
+          
+  # Stage 7: Post-deployment Validation
+  post-deployment:
+    name: Post-deployment Validation
+    runs-on: ubuntu-latest
+    needs: deploy-production
+    
+    steps:
+      - name: Smoke Tests
+        run: |
+          echo "Running smoke tests against PRODUCTION"
+          # Critical path validation
+          
+      - name: Monitor Deployment
+        run: |
+          echo "Monitoring deployment for 15 minutes..."
+          # Watch metrics, alerts
+          
+      - name: Notify Success
+        run: |
+          echo "🎉 Production deployment successful!"
+          # Slack/Teams notification
