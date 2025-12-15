@@ -13,10 +13,10 @@ config = Config(
     retries={'max_attempts': 2, 'mode': 'adaptive'}
 )
 
-# Global clients - reused across invocations
-bedrock = boto3.client('bedrock-runtime', region_name='ap-southeast-1', config=config)
-dynamodb = boto3.resource('dynamodb', config=config)
-s3 = boto3.client('s3', config=config)
+# Global clients - Cross-region setup
+bedrock = boto3.client('bedrock-runtime', region_name='us-east-1', config=config)  # Bedrock models in US East
+dynamodb = boto3.resource('dynamodb', region_name='ap-southeast-1', config=config)  # Data in Singapore
+s3 = boto3.client('s3', region_name='ap-southeast-1', config=config)  # Storage in Singapore
 
 def cors_response(status_code, body, content_type='application/json'):
     """Helper function to return response with CORS headers"""
